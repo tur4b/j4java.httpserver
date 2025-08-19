@@ -54,7 +54,7 @@ mvn clean install
 
 ```xml
 <dependency>
-    <groupId>j4httpserver.az</groupId>
+    <groupId>com.j4httpserver</groupId>
     <artifactId>j4java.httpserver</artifactId>
     <version>1.0</version>
 </dependency>
