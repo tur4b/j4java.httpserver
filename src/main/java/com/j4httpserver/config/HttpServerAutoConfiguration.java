@@ -139,7 +139,7 @@ public final class HttpServerAutoConfiguration {
 
     private static void writeErrorResponse(HttpExchange exchange, ErrorResponse errorResponse) throws IOException {
         OutputStream responseOutputStream = exchange.getResponseBody();
-        String errorResponseAsJson = JsonUtil.objectMapper.writeValueAsString(errorResponse);
+        String errorResponseAsJson = JsonUtil.writeAsString(errorResponse);
         byte[] responseAsJsonBytes = errorResponseAsJson.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(errorResponse.statusCode(), responseAsJsonBytes.length); // method not allowed
         responseOutputStream.write(responseAsJsonBytes);
