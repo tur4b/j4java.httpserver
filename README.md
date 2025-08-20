@@ -86,7 +86,7 @@ public class ExamController {
     }
     
     // we can use HttpExchange as parameter for our endpoint methods
-    @HttpEndpoint
+    @HttpEndpoint(path="/filter")
     public List<ExamDTO> getAllExamsByQueryParameters(HttpExchange exchange) {
         // get request params from exchange
         return ...;
@@ -137,7 +137,7 @@ public class ExamController {
         return List.of(new ExamDTO("Math"), new ExamDTO("Physics"));
     }
 
-    @HttpEndpoint
+    @HttpEndpoint(path = "/create")
     public ExamDTO createExam(@RequestBody ExamCreateRequest request) {
         // implement logic here
         return ....;
