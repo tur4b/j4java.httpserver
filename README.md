@@ -77,6 +77,8 @@ mvn clean install
 3. Annotate your controller classes with `@HttpServerExchange`:
 
 ```java
+import com.j4httpserver.annotation.RequestParam;
+
 @HttpServerExchange(path = "/exams")
 public class ExamController {
 
@@ -84,13 +86,21 @@ public class ExamController {
     public List<ExamDTO> getAllExams() {
         return ...;
     }
-    
+
     // we can use HttpExchange as parameter for our endpoint methods
-    @HttpEndpoint(path="/filter")
+    @HttpEndpoint(path = "/filter")
     public List<ExamDTO> getAllExamsByQueryParameters(HttpExchange exchange) {
         // get request params from exchange
         return ...;
     }
+    
+    @HttpEndpoint(path = "/special/filter")
+    public List<ExamDTO> getAllExamsWithRequestParams(@RequestParam(name = "title") String title,
+                                                      @RequestParam(name = "id") Integer id,
+                                                      @RequestParam(name = "isSpecial") boolean isSpecial) {
+        return ...;
+    }
+
 
 }
 ```
@@ -107,7 +117,8 @@ public class ExamController {
 | `@EnableHttpServer`   | Enable and configure the HTTP server (port, scan packages) <br/>- if subdirectories existed inside scan packages then those packages classes will be considered too) |
 | `@HttpServerExchange` | Mark a class as an HTTP controller with a base path                                                                                                                  |
 | `@HttpEndpoint`       | Mark a method as an HTTP endpoint for the controller                                                                                                                 |
-| `@RequestBody`        | Mark a method parameter in order to get request body from exchange                                                                                                      |
+| `@RequestBody`        | Mark a method parameter in order to get request body from exchange                                                                                                   |
+| `@RequestParam`       | Mark a method parameter in order to get request params from exchange<br/>`name` - is required field<br/>`required` - default is true                                   |
 
 ---
 
@@ -128,6 +139,8 @@ public class Application {
 ```java
 package com.practice.controller;
 
+import com.j4httpserver.annotation.RequestParam;
+
 @HttpServerExchange(path = "/exams")
 public class ExamController {
 
@@ -142,6 +155,13 @@ public class ExamController {
         // implement logic here
         return ....;
     }
+
+    @HttpEndpoint(path = "/search")
+    public List<ExamDTO> searchWithRequestParams(@RequestParam(name = "id") int id,
+                                                 @RequestParam(name = "search") String searchQuery) {
+        // implement logic here
+        return ....;
+    }
 }
 ```
 
@@ -152,5 +172,4 @@ public class ExamController {
 * Contributions and enhancements are welcome!
 * Possible improvements:
 
-    * Support for query parameters
-    * Support for path variables
+  * Support for path variables

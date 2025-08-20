@@ -22,4 +22,9 @@ public interface JsonUtil {
     static String writeAsString(Object value) throws JsonProcessingException {
         return objectMapper.writeValueAsString(value);
     }
+
+    static <T> T convertValue(Object fromValue, Type type) {
+        JavaType javaType = objectMapper.getTypeFactory().constructType(type);
+        return objectMapper.convertValue(fromValue, javaType);
+    }
 }
