@@ -1,17 +1,26 @@
 package com.j4httpserver.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.j4httpserver.annotation.RequestBody;
+import com.j4httpserver.enums.HttpMethod;
+import com.j4httpserver.model.ErrorResponse;
+import com.j4httpserver.util.ClassScanner;
+import com.j4httpserver.util.JsonUtil;
+import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.j4httpserver.annotation.EnableHttpServer;
 import com.j4httpserver.annotation.HttpEndpoint;
 import com.j4httpserver.annotation.HttpServerExchange;
 
-import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.lang.reflect.Type;
 import java.net.InetSocketAddress;
-import java.net.URL;
-import java.util.HashSet;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.logging.Logger;
@@ -20,8 +29,6 @@ public final class HttpServerAutoConfiguration {
 
     // FIXME: not good usage of thread pool - make it more production ready
     private static final ExecutorService EXECUTOR_SERVICE = Executors.newFixedThreadPool(10);
-
-    private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final Class<HttpServerAutoConfiguration> httpServerAutoConfigurationClass = HttpServerAutoConfiguration.class;
 
@@ -38,7 +45,7 @@ public final class HttpServerAutoConfiguration {
         EnableHttpServer enableHttpServer = mainClass.getAnnotation(EnableHttpServer.class);
         int port = enableHttpServer.port();
         String[] packagesToScan = enableHttpServer.scanPackages();
-        Set<Class<?>> httpServerExchangeClasses = getLoadedHttpServerExchangeClasses(packagesToScan);
+        Set<Class<?>> httpServerExchangeClasses = ClassScanner.getLoadedHttpServerExchangeClasses(packagesToScan);
 
         HttpServer httpServer = HttpServer.create(new InetSocketAddress(port), 0);
         httpServer.setExecutor(EXECUTOR_SERVICE);
@@ -54,34 +61,7 @@ public final class HttpServerAutoConfiguration {
             Method[] methods = httpServerExchangeClass.getMethods();
 
             for(Method method : methods) {
-                HttpEndpoint httpEndpoint = method.getAnnotation(HttpEndpoint.class);
-                if(httpEndpoint != null) {
-                    String path = httpServerExchange.path() + httpEndpoint.path();
-                    log.info(">> path: " + path);
-                    int statusCode = httpEndpoint.statusCode();
-
-                    httpServer.createContext(path, exchange -> {
-                        OutputStream responseOutputStream = exchange.getResponseBody();
-                        try {
-                            log.info(">> exchange handler handles: " + exchange.getRequestMethod() + " " + exchange.getRequestURI());
-
-                            Object response = method.invoke(httpServerExchangeInstance, exchange);
-                            String responseJson = objectMapper.writeValueAsString(response);
-
-                            exchange.getResponseHeaders().add("Content-Type", "application/json");
-                            exchange.sendResponseHeaders(statusCode, responseJson.length());
-                            responseOutputStream.write(responseJson.getBytes());
-                            responseOutputStream.flush();
-
-                        } catch (Exception e) {
-                            e.printStackTrace();
-                            exchange.sendResponseHeaders(500, 0);
-                            responseOutputStream.flush();
-                        } finally {
-                            responseOutputStream.close();
-                        }
-                    });
-                }
+                createHttpServerContexts(httpServerExchange, httpServer, httpServerExchangeInstance, method);
             }
         }
 
@@ -89,38 +69,82 @@ public final class HttpServerAutoConfiguration {
         httpServer.start();
     }
 
-    private static Set<Class<?>> getLoadedHttpServerExchangeClasses(String... packagesToScan) throws ClassNotFoundException {
-        Set<Class<?>> classes = new HashSet<Class<?>>();
+    private static void createHttpServerContexts(HttpServerExchange httpServerExchange,
+                                                 HttpServer httpServer,
+                                                 Object httpServerExchangeInstance,
+                                                 Method method) {
+        HttpEndpoint httpEndpoint = method.getAnnotation(HttpEndpoint.class);
+        if(httpEndpoint != null) {
+            String path = httpServerExchange.path() + httpEndpoint.path();
+            HttpMethod httpMethod = httpEndpoint.method();
 
-        for(String basePackage : packagesToScan) {
-            String pckToScan = basePackage.replace('.', '/');
+            log.info(">> path: " + path + " - method: " + httpMethod);
+            int statusCode = httpEndpoint.statusCode();
 
-            ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-            URL resource = classLoader.getResource(pckToScan);
-            if (resource == null) {
-                throw new IllegalArgumentException("Package not found: " + pckToScan);
-            }
-
-            File directory = new File(resource.getFile());
-            File[] files = directory.listFiles();
-
-            for(File file : files) {
-                String fileName = file.getName();
-                if (file.isFile()) {
-                    log.info("fileName = " + fileName);
-                    if (fileName.endsWith(".class")) {
-                        String className = basePackage + "." + fileName.replace(".class", "");
-                        Class<?> aClass = Class.forName(className);
-                        if (aClass.isAnnotationPresent(HttpServerExchange.class)) {
-                            classes.add(aClass);
-                        }
+            httpServer.createContext(path, exchange -> {
+                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                OutputStream responseOutputStream = exchange.getResponseBody();
+                try {
+                    if(!exchange.getRequestMethod().equalsIgnoreCase(httpMethod.name())) {
+                        ErrorResponse errorResponse = new ErrorResponse(exchange.getRequestMethod() + " method not allowed for this endpoint", "method not allowed", 405);
+                        writeErrorResponse(exchange, errorResponse);
+                        return;
                     }
-                } else if(file.isDirectory()) {
-                    log.info(">> file is directory: " + basePackage + "." + fileName);
-                    classes.addAll(getLoadedHttpServerExchangeClasses(basePackage + "." + fileName));
+
+                    log.info(">> exchange handler handles: " + exchange.getRequestMethod() + " " + exchange.getRequestURI());
+
+
+                    final Object[] args = getMethodArguments(method, exchange);
+
+                    Object response = method.invoke(httpServerExchangeInstance, args);
+                    String responseJson = JsonUtil.writeAsString(response);
+
+                    exchange.sendResponseHeaders(statusCode, responseJson.length());
+                    responseOutputStream.write(responseJson.getBytes(StandardCharsets.UTF_8));
+                    responseOutputStream.flush();
+
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    ErrorResponse errorResponse = new ErrorResponse(e.getMessage(), "internal server error", 500);
+                    writeErrorResponse(exchange, errorResponse);
+                } finally {
+                    responseOutputStream.close();
                 }
+            });
+        }
+    }
+
+    private static Object[] getMethodArguments(Method method, HttpExchange exchange) throws IOException {
+        final Parameter[] parameters = method.getParameters();
+        final Object[] args = new Object[parameters.length];
+
+        for(int i = 0; i < method.getParameterCount(); i++) {
+            Parameter parameter = parameters[i];
+            Type parameterizedType = parameter.getParameterizedType();
+            log.info(">> parameter: " + parameter.getName() + " - " + parameterizedType.getTypeName());
+
+            RequestBody requestBodyAnnotation = parameter.getAnnotation(RequestBody.class);
+
+            if("com.sun.net.httpserver.HttpExchange".equalsIgnoreCase(parameterizedType.getTypeName())) {
+                args[i] = exchange;
+            } else if(requestBodyAnnotation != null) {
+                InputStream requestInputStream = exchange.getRequestBody();
+                Object requestBody = JsonUtil.readAs(requestInputStream, parameterizedType);
+                args[i] = requestBody;
+            }
+            else {
+                args[i] = parameter;
             }
         }
-        return classes;
+        return args;
+    }
+
+    private static void writeErrorResponse(HttpExchange exchange, ErrorResponse errorResponse) throws IOException {
+        OutputStream responseOutputStream = exchange.getResponseBody();
+        String errorResponseAsJson = JsonUtil.objectMapper.writeValueAsString(errorResponse);
+        byte[] responseAsJsonBytes = errorResponseAsJson.getBytes(StandardCharsets.UTF_8);
+        exchange.sendResponseHeaders(errorResponse.statusCode(), responseAsJsonBytes.length); // method not allowed
+        responseOutputStream.write(responseAsJsonBytes);
+        responseOutputStream.flush();
     }
 }
