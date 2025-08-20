@@ -81,7 +81,14 @@ mvn clean install
 public class ExamController {
 
     @HttpEndpoint
-    public List<ExamDTO> getAllExams(HttpExchange exchange) {
+    public List<ExamDTO> getAllExams() {
+        return ...;
+    }
+    
+    // we can use HttpExchange as parameter for our endpoint methods
+    @HttpEndpoint(path="/filter")
+    public List<ExamDTO> getAllExamsByQueryParameters(HttpExchange exchange) {
+        // get request params from exchange
         return ...;
     }
 
@@ -89,17 +96,18 @@ public class ExamController {
 ```
 
 4. Annotate controller methods with `@HttpEndpoint`.
-  > Each method must accept a `HttpExchange` object as a parameter.
+> `HttpExchange` parameter is not required. We can use it if we want to get request details.
 
 ---
 
 ## Annotations Overview
 
 | Annotation            | Usage                                                                                                                                                                |
-| --------------------- |----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `@EnableHttpServer`   | Enable and configure the HTTP server (port, scan packages) <br/>- if subdirectories existed inside scan packages then those packages classes will be considered too) |
 | `@HttpServerExchange` | Mark a class as an HTTP controller with a base path                                                                                                                  |
 | `@HttpEndpoint`       | Mark a method as an HTTP endpoint for the controller                                                                                                                 |
+| `@RequestBody`        | Mark a method parameter in order to get request body from exchange                                                                                                      |
 
 ---
 
@@ -124,9 +132,15 @@ package com.practice.controller;
 public class ExamController {
 
     @HttpEndpoint
-    public List<ExamDTO> getAllExams(HttpExchange exchange) {
+    public List<ExamDTO> getAllExams(HttpExchange exchange) { // using HttpExchange as a parameter is optional
         // implement logic here
         return List.of(new ExamDTO("Math"), new ExamDTO("Physics"));
+    }
+
+    @HttpEndpoint(path = "/create")
+    public ExamDTO createExam(@RequestBody ExamCreateRequest request) {
+        // implement logic here
+        return ....;
     }
 }
 ```
@@ -138,6 +152,5 @@ public class ExamController {
 * Contributions and enhancements are welcome!
 * Possible improvements:
 
-    * Support for request bodies
     * Support for query parameters
     * Support for path variables
