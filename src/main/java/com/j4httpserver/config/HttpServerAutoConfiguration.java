@@ -16,9 +16,7 @@ import java.lang.reflect.Parameter;
 import java.lang.reflect.Type;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.logging.Logger;
 
@@ -42,23 +40,20 @@ public final class HttpServerAutoConfiguration {
         EnableHttpServer enableHttpServer = mainClass.getAnnotation(EnableHttpServer.class);
         int port = enableHttpServer.port();
         String[] packagesToScan = enableHttpServer.scanPackages();
-        Set<Class<?>> httpServerExchangeClasses = ClassScanner.getLoadedHttpServerExchangeClasses(packagesToScan);
+        Set<Class<?>> httpServerExchangeClasses = ClassScanner.getLoadedClassesWithAnnotation(HttpServerExchange.class, packagesToScan);
 
         HttpServer httpServer = HttpServer.create(new InetSocketAddress(port), 0);
         httpServer.setExecutor(EXECUTOR_SERVICE);
 
         for(Class<?> httpServerExchangeClass : httpServerExchangeClasses) {
             HttpServerExchange httpServerExchange = httpServerExchangeClass.getAnnotation(HttpServerExchange.class);
-            if(httpServerExchange == null) {
-                break;
-            }
-
             log.info(">> class: " + httpServerExchangeClass.getName() + " was defined as HttpServerExchange");
+
             Object httpServerExchangeInstance = httpServerExchangeClass.getDeclaredConstructor().newInstance();
             Method[] methods = httpServerExchangeClass.getMethods();
 
             for(Method method : methods) {
-                createHttpServerContexts(httpServerExchange, httpServer, httpServerExchangeInstance, method);
+                registerEndpoint(httpServerExchange, httpServer, httpServerExchangeInstance, method, packagesToScan);
             }
         }
 
@@ -68,10 +63,11 @@ public final class HttpServerAutoConfiguration {
 
     // ******************************** helper methods *********************************
 
-    private static void createHttpServerContexts(HttpServerExchange httpServerExchange,
-                                                 HttpServer httpServer,
-                                                 Object httpServerExchangeInstance,
-                                                 Method method) {
+    private static void registerEndpoint(HttpServerExchange httpServerExchange,
+                                         HttpServer httpServer,
+                                         Object httpServerExchangeInstance,
+                                         Method method,
+                                         String... interceptorPackages) {
         HttpEndpoint httpEndpoint = method.getAnnotation(HttpEndpoint.class);
         if(httpEndpoint != null) {
             String path = httpServerExchange.path() + httpEndpoint.path();
@@ -81,38 +77,63 @@ public final class HttpServerAutoConfiguration {
             int statusCode = httpEndpoint.statusCode();
 
             httpServer.createContext(path, exchange -> {
-                exchange.getResponseHeaders().add("Content-Type", "application/json");
-                OutputStream responseOutputStream = exchange.getResponseBody();
                 try {
-                    if(!exchange.getRequestMethod().equalsIgnoreCase(httpMethod.name())) {
-                        ErrorResponse errorResponse = new ErrorResponse(exchange.getRequestMethod() + " method not allowed for this endpoint", "method not allowed", 405);
-                        writeErrorResponse(exchange, errorResponse);
+                    exchange.getResponseHeaders().add("Content-Type", "application/json");
+
+                    // check if valid endpoint
+                    String requestURIPath = exchange.getRequestURI().getPath();
+                    if(!path.equals(requestURIPath)) {
+                        writeResponse(exchange,  new ErrorResponse("invalid request path", "invalid.endpoint"), 404);
                         return;
                     }
 
+                    // check if valid method
+                    if(!exchange.getRequestMethod().equalsIgnoreCase(httpMethod.name())) {
+                        writeResponse(exchange,  new ErrorResponse(exchange.getRequestMethod() + " method not allowed for this endpoint",
+                                "method not allowed"), 405);
+                        return;
+                    }
+
+                    // apply preHandle interceptor method
+                    List<Class<?>> interceptorClasses = ClassScanner.getLoadedClassesWithAnnotation(Interceptor.class, interceptorPackages)
+                            .stream()
+                            .sorted(Comparator.comparing(cls -> cls.getAnnotation(Interceptor.class).order()))
+                            .toList();
+
+                    for (Class<?> interceptorClass : interceptorClasses) {
+                        if(HttpExchangeInterceptor.class.isAssignableFrom(interceptorClass)) {
+                            log.info(">> interceptor: " + interceptorClass.getName());
+                            Object interceptorInstance = interceptorClass.getDeclaredConstructor().newInstance();
+                            interceptorClass.getMethod("preHandle", HttpExchange.class).invoke(interceptorInstance, exchange);
+                        }
+                    }
+
+                    // invoke the method according to the endpoint
                     log.info(">> exchange handler handles: " + exchange.getRequestMethod() + " " + exchange.getRequestURI());
-
-                    final Object[] args = getMethodArguments(method, exchange);
-
+                    final Object[] args = resolveMethodArguments(method, exchange);
                     Object response = method.invoke(httpServerExchangeInstance, args);
-                    String responseJson = JsonUtil.writeAsString(response);
+                    writeResponse(exchange, response, statusCode);
 
-                    exchange.sendResponseHeaders(statusCode, responseJson.length());
-                    responseOutputStream.write(responseJson.getBytes(StandardCharsets.UTF_8));
-                    responseOutputStream.flush();
+                    // apply postHandle interceptor method
+                    for (Class<?> interceptorClass : interceptorClasses) {
+                        if(HttpExchangeInterceptor.class.isAssignableFrom(interceptorClass)) {
+                            log.info(">> interceptor: " + interceptorClass.getName());
+                            Object interceptorInstance = interceptorClass.getDeclaredConstructor().newInstance();
+                            interceptorClass.getMethod("postHandle", HttpExchange.class, Object.class).invoke(interceptorInstance, exchange, response);
+                        }
+                    }
 
                 } catch (Exception e) {
                     e.printStackTrace();
-                    ErrorResponse errorResponse = new ErrorResponse(e.getMessage(), "internal server error", 500);
-                    writeErrorResponse(exchange, errorResponse);
-                } finally {
-                    responseOutputStream.close();
+                    Throwable cause = e.getCause();
+                    String errorMessage = e.getMessage() == null ? cause.getMessage() : e.getMessage();
+                    writeResponse(exchange,  new ErrorResponse(errorMessage, "internal server error"), 500);
                 }
             });
         }
     }
 
-    private static Object[] getMethodArguments(Method method, HttpExchange exchange) throws IOException {
+    private static Object[] resolveMethodArguments(Method method, HttpExchange exchange) throws IOException {
         final Parameter[] parameters = method.getParameters();
         final Object[] args = new Object[parameters.length];
 
@@ -122,24 +143,23 @@ public final class HttpServerAutoConfiguration {
             String parameterName = parameter.getName();
             log.info(">> parameter: " + parameterName + " - " + parameterizedType.getTypeName());
 
-            RequestBody requestBodyAnnotation = parameter.getAnnotation(RequestBody.class);
-            RequestParam requestParamAnnotation = parameter.getAnnotation(RequestParam.class);
-            System.out.println(">> requestParamAnnotation: " + requestParamAnnotation);
-
-            if("com.sun.net.httpserver.HttpExchange".equalsIgnoreCase(parameterizedType.getTypeName())) {
+            if(HttpExchange.class.isAssignableFrom(parameter.getType())) {
                 args[i] = exchange;
                 continue;
             }
-            if(requestBodyAnnotation != null) {
-                InputStream requestInputStream = exchange.getRequestBody();
-                Object requestBody = JsonUtil.readAs(requestInputStream, parameterizedType);
-                args[i] = requestBody;
-                continue;
+            if(parameter.isAnnotationPresent(RequestBody.class)) {
+                try(InputStream requestInputStream = exchange.getRequestBody()) {
+                    Object requestBody = JsonUtil.readAs(requestInputStream, parameterizedType);
+                    args[i] = requestBody;
+                    continue;
+                }
             }
-            if(requestParamAnnotation != null) {
+            if(parameter.isAnnotationPresent(RequestParam.class)) {
+                RequestParam requestParamAnnotation = parameter.getAnnotation(RequestParam.class);
                 boolean required = requestParamAnnotation.required();
+                String defaultValue = requestParamAnnotation.defaultValue();
 //                String requestParamName = requestParamAnnotation.name().isEmpty() ? parameterName : requestParamAnnotation.name();
-                Object arg = getRequestParamByName(exchange, requestParamAnnotation.name(), parameterizedType);
+                Object arg = getRequestParamByNameOrElse(exchange, requestParamAnnotation.name(), parameterizedType, defaultValue);
 
                 if(required && arg == null) {
                     throw new RuntimeException("Required parameter " + requestParamAnnotation.name() + " not found");
@@ -152,13 +172,15 @@ public final class HttpServerAutoConfiguration {
         return args;
     }
 
-    private static void writeErrorResponse(HttpExchange exchange, ErrorResponse errorResponse) throws IOException {
-        OutputStream responseOutputStream = exchange.getResponseBody();
-        String errorResponseAsJson = JsonUtil.writeAsString(errorResponse);
-        byte[] responseAsJsonBytes = errorResponseAsJson.getBytes(StandardCharsets.UTF_8);
-        exchange.sendResponseHeaders(errorResponse.statusCode(), responseAsJsonBytes.length); // method not allowed
-        responseOutputStream.write(responseAsJsonBytes);
-        responseOutputStream.flush();
+    private static void writeResponse(HttpExchange exchange, Object response, int statusCode) throws IOException {
+        String responseAsJson = JsonUtil.writeAsString(response);
+        byte[] responseAsJsonBytes = responseAsJson.getBytes(StandardCharsets.UTF_8);
+        exchange.sendResponseHeaders(statusCode, responseAsJsonBytes.length);
+
+        try(OutputStream responseOutputStream = exchange.getResponseBody()) {
+            responseOutputStream.write(responseAsJsonBytes);
+            responseOutputStream.flush();
+        }
     }
 
     private static Map<String, String> getRequestParams(HttpExchange httpExchange) {
@@ -167,15 +189,15 @@ public final class HttpServerAutoConfiguration {
         if(query != null && !(query = query.trim()).isEmpty()) {
             String[] parameters = query.split("&");
             for(String parameter : parameters) {
-                String[] keyValue = parameter.split("=");
+                String[] keyValue = parameter.split("=", 2);
                 requestParams.put(keyValue[0], keyValue[1]);
             }
         }
         return requestParams;
     }
 
-    private static Object getRequestParamByName(HttpExchange httpExchange, String paramName, Type paramType) {
-       String value = getRequestParams(httpExchange).get(paramName);
-       return JsonUtil.convertValue(value, paramType);
+    private static Object getRequestParamByNameOrElse(HttpExchange httpExchange, String paramName, Type paramType, Object defaultValue) {
+        String value = getRequestParams(httpExchange).get(paramName);
+        return (value != null && !value.isEmpty()) ? JsonUtil.convertValue(value, paramType) : (defaultValue != null ? JsonUtil.convertValue(defaultValue, paramType) : null);
     }
 }

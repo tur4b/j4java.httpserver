@@ -3,6 +3,7 @@ package com.j4httpserver.util;
 import com.j4httpserver.annotation.HttpServerExchange;
 
 import java.io.File;
+import java.lang.annotation.Annotation;
 import java.net.URL;
 import java.util.HashSet;
 import java.util.Set;
@@ -12,7 +13,7 @@ public interface ClassScanner {
 
     Logger log = Logger.getLogger(ClassScanner.class.getSimpleName());
 
-    static Set<Class<?>> getLoadedHttpServerExchangeClasses(String... packagesToScan) throws ClassNotFoundException {
+    static Set<Class<?>> getLoadedClassesWithAnnotation(Class<? extends Annotation> annotationCls, String... packagesToScan) throws ClassNotFoundException {
         Set<Class<?>> classes = new HashSet<Class<?>>();
 
         for(String basePackage : packagesToScan) {
@@ -34,17 +35,18 @@ public interface ClassScanner {
                     if (fileName.endsWith(".class")) {
                         String className = basePackage + "." + fileName.replace(".class", "");
                         Class<?> aClass = Class.forName(className);
-                        if (aClass.isAnnotationPresent(HttpServerExchange.class)) {
+                        if (aClass.isAnnotationPresent(annotationCls)) {
                             classes.add(aClass);
                         }
                     }
                 } else if(file.isDirectory()) {
                     log.info(">> file is directory: " + basePackage + "." + fileName);
-                    classes.addAll(getLoadedHttpServerExchangeClasses(basePackage + "." + fileName));
+                    classes.addAll(getLoadedClassesWithAnnotation(annotationCls,basePackage + "." + fileName));
                 }
             }
         }
         return classes;
     }
+
 
 }
